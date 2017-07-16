@@ -33,6 +33,8 @@ struct ctl_indexed_node_s {
 struct ctl_arena_stats_s {
 	bool			initialized;
 	unsigned		nthreads;
+	const char		*dss;
+	ssize_t			lg_dirty_mult;
 	size_t			pactive;
 	size_t			pdirty;
 	arena_stats_t		astats;
@@ -45,22 +47,16 @@ struct ctl_arena_stats_s {
 
 	malloc_bin_stats_t	bstats[NBINS];
 	malloc_large_stats_t	*lstats;	/* nlclasses elements. */
+	malloc_huge_stats_t	*hstats;	/* nhclasses elements. */
 };
 
 struct ctl_stats_s {
 	size_t			allocated;
 	size_t			active;
+	size_t			metadata;
+	size_t			resident;
 	size_t			mapped;
-	struct {
-		size_t		current;	/* stats_chunks.curchunks */
-		uint64_t	total;		/* stats_chunks.nchunks */
-		size_t		high;		/* stats_chunks.highchunks */
-	} chunks;
-	struct {
-		size_t		allocated;	/* huge_allocated */
-		uint64_t	nmalloc;	/* huge_nmalloc */
-		uint64_t	ndalloc;	/* huge_ndalloc */
-	} huge;
+	unsigned		narenas;
 	ctl_arena_stats_t	*arenas;	/* (narenas + 1) elements. */
 };
 
@@ -75,6 +71,9 @@ int	ctl_nametomib(const char *name, size_t *mibp, size_t *miblenp);
 int	ctl_bymib(const size_t *mib, size_t miblen, void *oldp, size_t *oldlenp,
     void *newp, size_t newlen);
 bool	ctl_boot(void);
+void	ctl_prefork(void);
+void	ctl_postfork_parent(void);
+void	ctl_postfork_child(void);
 
 #define	xmallctl(name, oldp, oldlenp, newp, newlen) do {		\
 	if (je_mallctl(name, oldp, oldlenp, newp, newlen)		\

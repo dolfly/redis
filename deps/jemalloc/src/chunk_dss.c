@@ -3,6 +3,16 @@
 /******************************************************************************/
 /* Data. */
 
+const char	*dss_prec_names[] = {
+	"disabled",
+	"primary",
+	"secondary",
+	"N/A"
+};
+
+/* Current dss precedence default, used when creating new arenas. */
+static dss_prec_t	dss_prec_default = DSS_PREC_DEFAULT;
+
 /*
  * Protects sbrk() calls.  This avoids malloc races among threads, though it
  * does not protect against races with threads that call sbrk() directly.
@@ -18,23 +28,48 @@ static void		*dss_max;
 
 /******************************************************************************/
 
-#ifndef JEMALLOC_HAVE_SBRK
 static void *
-sbrk(intptr_t increment)
+chunk_dss_sbrk(intptr_t increment)
 {
 
+#ifdef JEMALLOC_DSS
+	return (sbrk(increment));
+#else
 	not_implemented();
-
 	return (NULL);
-}
 #endif
+}
+
+dss_prec_t
+chunk_dss_prec_get(void)
+{
+	dss_prec_t ret;
+
+	if (!have_dss)
+		return (dss_prec_disabled);
+	malloc_mutex_lock(&dss_mtx);
+	ret = dss_prec_default;
+	malloc_mutex_unlock(&dss_mtx);
+	return (ret);
+}
+
+bool
+chunk_dss_prec_set(dss_prec_t dss_prec)
+{
+
+	if (!have_dss)
+		return (dss_prec != dss_prec_disabled);
+	malloc_mutex_lock(&dss_mtx);
+	dss_prec_default = dss_prec;
+	malloc_mutex_unlock(&dss_mtx);
+	return (false);
+}
 
 void *
-chunk_alloc_dss(size_t size, size_t alignment, bool *zero)
+chunk_alloc_dss(arena_t *arena, void *new_addr, size_t size, size_t alignment,
+    bool *zero, bool *commit)
 {
-	void *ret;
-
-	cassert(config_dss);
+	cassert(have_dss);
 	assert(size > 0 && (size & chunksize_mask) == 0);
 	assert(alignment > 0 && (alignment & chunksize_mask) == 0);
 
@@ -47,9 +82,6 @@ chunk_alloc_dss(size_t size, size_t alignment, bool *zero)
 
 	malloc_mutex_lock(&dss_mtx);
 	if (dss_prev != (void *)-1) {
-		size_t gap_size, cpad_size;
-		void *cpad, *dss_next;
-		intptr_t incr;
 
 		/*
 		 * The loop is necessary to recover from races with other
@@ -57,8 +89,20 @@ chunk_alloc_dss(size_t size, size_t alignment, bool *zero)
 		 * malloc.
 		 */
 		do {
+			void *ret, *cpad, *dss_next;
+			size_t gap_size, cpad_size;
+			intptr_t incr;
+			/* Avoid an unnecessary system call. */
+			if (new_addr != NULL && dss_max != new_addr)
+				break;
+
 			/* Get the current end of the DSS. */
-			dss_max = sbrk(0);
+			dss_max = chunk_dss_sbrk(0);
+
+			/* Make sure the earlier condition still holds. */
+			if (new_addr != NULL && dss_max != new_addr)
+				break;
+
 			/*
 			 * Calculate how much padding is necessary to
 			 * chunk-align the end of the DSS.
@@ -82,17 +126,25 @@ chunk_alloc_dss(size_t size, size_t alignment, bool *zero)
 				return (NULL);
 			}
 			incr = gap_size + cpad_size + size;
-			dss_prev = sbrk(incr);
+			dss_prev = chunk_dss_sbrk(incr);
 			if (dss_prev == dss_max) {
 				/* Success. */
 				dss_max = dss_next;
 				malloc_mutex_unlock(&dss_mtx);
-				if (cpad_size != 0)
-					chunk_dealloc(cpad, cpad_size, true);
+				if (cpad_size != 0) {
+					chunk_hooks_t chunk_hooks =
+					    CHUNK_HOOKS_INITIALIZER;
+					chunk_dalloc_wrapper(arena,
+					    &chunk_hooks, cpad, cpad_size,
+					    true);
+				}
 				if (*zero) {
-					VALGRIND_MAKE_MEM_UNDEFINED(ret, size);
+					JEMALLOC_VALGRIND_MAKE_MEM_UNDEFINED(
+					    ret, size);
 					memset(ret, 0, size);
 				}
+				if (!*commit)
+					*commit = pages_decommit(ret, size);
 				return (ret);
 			}
 		} while (dss_prev != (void *)-1);
@@ -107,7 +159,7 @@ chunk_in_dss(void *chunk)
 {
 	bool ret;
 
-	cassert(config_dss);
+	cassert(have_dss);
 
 	malloc_mutex_lock(&dss_mtx);
 	if ((uintptr_t)chunk >= (uintptr_t)dss_base
@@ -124,11 +176,11 @@ bool
 chunk_dss_boot(void)
 {
 
-	cassert(config_dss);
+	cassert(have_dss);
 
 	if (malloc_mutex_init(&dss_mtx))
 		return (true);
-	dss_base = sbrk(0);
+	dss_base = chunk_dss_sbrk(0);
 	dss_prev = dss_base;
 	dss_max = dss_base;
 
@@ -139,7 +191,7 @@ void
 chunk_dss_prefork(void)
 {
 
-	if (config_dss)
+	if (have_dss)
 		malloc_mutex_prefork(&dss_mtx);
 }
 
@@ -147,7 +199,7 @@ void
 chunk_dss_postfork_parent(void)
 {
 
-	if (config_dss)
+	if (have_dss)
 		malloc_mutex_postfork_parent(&dss_mtx);
 }
 
@@ -155,7 +207,7 @@ void
 chunk_dss_postfork_child(void)
 {
 
-	if (config_dss)
+	if (have_dss)
 		malloc_mutex_postfork_child(&dss_mtx);
 }
 
